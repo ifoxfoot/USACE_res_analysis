@@ -1,0 +1,108 @@
+---
+title: "Sentinel 2 Reservoir Data Processing"
+author: "Iris Foxfoot"
+date: "2024-06-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here) #for file paths
+library(janitor) #for cleaning names
+library(lubridate) #for dealing with dates
+library(sf) #for spatial data
+library(dplyr) #for data wrangling
+library(tidyr) #for pivot wider
+library(ggplot2) #for plots
+```
+
+# Purpose
+
+The purpose of this code is to convert sentinel-2 data into usable metrics.
+
+# Sentinel-2 Data Processing
+
+Sentinel-2 data acquisition was done using google earth engine. I used Sentinel 2: Level-2A orthorectified atmospherically corrected surface reflectance data from Jan 1st 2023 to Jan 1st 2024. First the USACE_final reservoir data was uploaded to google earth engine as an asset. It was then imported and simplified to be accurate within 100m using the simplify function to reduce the complexity of the object. Within each simplified reservoir, I then selected pixels that were classified as water in sentinel-2 L2A's Scene Classification (SCL) image. Water pixels are designated a value of 6. This was done to remove potential clouds, ice, snow, and land pixels from the dataset. Then I calculated the mean of all bands of interest across all water pixels within the simplified reservoir. These values were then exported from google earth engine.
+
+The google earth engine code editor code is stored in a text file (gee_sentinal_extract).
+
+# NDCI
+
+The Normalized Difference Chlorophyll Index (NDCI) from Mishra & Mishra 2012 (https://doi.org/10.1016/j.rse.2011.10.016) indicates the presence of chlorophyll-a. The NDCI output ranges from -1 to 1, smaller values likely have less chlorophyll-a while higher values likely have an increased concentration of chlorophyll-a. Though the NDCI was developed for coastal and estuary waters, it has also been successfully used for North American reservoirs (see Kislik et al., 2022 https://doi.org/10.1016/j.ecolind.2022.109041).
+
+When using sentinel 2 data, the formula for NDCI is
+
+(B5 - B4)/(B5 + B4)
+
+Where B5 is red edge 1 and B4 is red.
+
+# Data processing
+
+```{r}
+#read in sentinel 2 data
+raw_sentinel <- read.csv(here("raw_data/full_lake_colors_1yr.csv")) %>%
+  clean_names()
+
+#add NDCI 
+ndci_added <- raw_sentinel %>%
+  mutate(ndci = (red_edge1 - red)/(red_edge1 + red)) %>% 
+  mutate(ndci = case_when(red == 0 & red_edge1 == 0 ~ 0,
+         .default = ndci))
+
+#add seasons from dates
+ndci_seasonal <- ndci_added %>% 
+  mutate(season = case_when(
+    month(date) %in% c(12, 1, 2) ~ "winter",
+    month(date) %in% c(3, 4, 5) ~ "spring",
+    month(date) %in% c(6, 7, 8) ~ "summer",
+    month(date) %in% c(9, 10, 11) ~ "fall",
+    .default = "Not assigned"
+         ))
+
+#summarise by season (min, mean, max)
+seasonal_summary <- ndci_seasonal %>% 
+  group_by(name, season) %>% 
+  summarise(mean_ndci = mean(ndci), min_ndci = min(ndci), max_ndci = max(ndci))
+
+#pivot wider
+seasonal_wide <- seasonal_summary %>% 
+  pivot_wider(names_from = season,
+              values_from = mean_ndci:max_ndci) 
+
+#save to csv
+#write.csv(seasonal_wide, "extracted_data/seasonal_ndci.csv")
+```
+
+# Plot NDCI
+
+```{r}
+#arkansas pool 3, AR
+ark_pool <- ndci_added %>% 
+  filter(name == "Arkansas River Pool  3")
+
+ggplot(data = ark_pool) +
+  geom_line(aes(x = date(date), y = ndci))
+
+#Conchas Reservoir, NM
+conchas <- ndci_added %>% 
+  filter(name == "Conchas Reservoir")
+
+ggplot(data = conchas) +
+  geom_line(aes(x = date(date), y = ndci))
+
+#Lake Umatilla, wa
+umatilla <- ndci_added %>% 
+  filter(name == "Lake Umatilla")
+
+ggplot(data = umatilla) +
+  geom_line(aes(x = date(date), y = ndci)) +
+  labs(x = "Month", y = "NDCI",
+       title = "2023 Normalized Difference Chlorophyll Index (NDCI) for Lake Umatilla, WA",
+       caption = "Figure 1: Average monthly Normalized Difference Chlorophyll Index (NDCI) values for Lake Umatilla, WA in 2023. The NDCI ranges\nfrom -1 to 1. Smaller NDCI values indicate lower chlorophyll-a levels while higher NDCI values indicate increased concentrations of\nchlorophyll-a. NDCI was calculated from the Sentinel 2 Surface Reflectance dataset, downloaded from Google Earth Engine.\nFigure by Iris Foxfoot") +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") +
+  theme_minimal() +
+  theme(plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0),
+        axis.title.y = element_text(angle = 0, vjust=0.5))
+```
+

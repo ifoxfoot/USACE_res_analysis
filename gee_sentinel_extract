@@ -1,0 +1,105 @@
+
+// lakes data too complex, simplify it 
+var simplifiedlakes = lakes.map(function(feature) {
+  return feature.simplify({maxError:  100});
+});
+
+//function to extract mean values
+function zonalStats(ic, fc, params) {
+  // Initialize internal params dictionary.
+  var _params = {
+    reducer: ee.Reducer.mean(),
+    scale: null,
+    crs: null,
+    bands: null,
+    bandsRename: null,
+    imgProps: null,
+    imgPropsRename: null,
+    datetimeName: 'datetime',
+    datetimeFormat: 'YYYY-MM-dd HH:mm:ss'
+  };
+
+  // Replace initialized params with provided params.
+  if (params) {
+    for (var param in params) {
+      _params[param] = params[param] || _params[param];
+    }
+  }
+
+  // Set default parameters based on an image representative.
+  var imgRep = ic.first();
+  var nonSystemImgProps = ee.Feature(null)
+    .copyProperties(imgRep).propertyNames();
+  if (!_params.bands) _params.bands = imgRep.bandNames();
+  if (!_params.bandsRename) _params.bandsRename = _params.bands;
+  if (!_params.imgProps) _params.imgProps = nonSystemImgProps;
+  if (!_params.imgPropsRename) _params.imgPropsRename = _params.imgProps;
+
+  // Map the reduceRegions function over the image collection.
+  var results = ic.map(function(img) {
+    // Select bands (optionally rename), set a datetime & timestamp property.
+    img = ee.Image(img.select(_params.bands, _params.bandsRename))
+      .set(_params.datetimeName, img.date().format(_params.datetimeFormat))
+      .set('timestamp', img.get('system:time_start'));
+
+    // Define final image property dictionary to set in output features.
+    var propsFrom = ee.List(_params.imgProps)
+      .cat(ee.List([_params.datetimeName, 'timestamp']));
+    var propsTo = ee.List(_params.imgPropsRename)
+      .cat(ee.List([_params.datetimeName, 'timestamp']));
+    var imgProps = img.toDictionary(propsFrom).rename(propsFrom, propsTo);
+
+    // Subset points that intersect the given image.
+    var fcSub = fc.filterBounds(img.geometry());
+
+    // Reduce the image by regions.
+    return img.reduceRegions({
+      collection: fcSub,
+      reducer: _params.reducer,
+      scale: _params.scale,
+      crs: _params.crs
+    })
+    // Add metadata to each feature.
+    .map(function(f) {
+      return f.set(imgProps);
+    });
+  }).flatten().filter(ee.Filter.notNull(_params.bandsRename));
+
+  return results;
+}
+
+//function to select only water pixels
+function s2Water(image) {
+      var scl = image.select('SCL');
+      var clear_water_pixels = scl.eq(6);
+      return image.updateMask(clear_water_pixels).divide(10000).copyProperties(image, ["system:time_start"]);
+}
+
+
+//download sentinel-2 data most recent five years
+var dataset = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterDate('2023-01-01', '2024-01-01')
+                  .filterBounds(simplifiedlakes)
+                  .map(s2Water);
+
+// Define parameters for the zonalStats function.
+var params = {
+  reducer: ee.Reducer.mean(),
+  scale: 20,
+  bands: [ 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12'], 
+  bandsRename: ['blue', 'green', 'red', 'red_edge1', 'red_edge2', 'red_edge3', 'NIR', 'red_edge4', 'SWIR_1', 'SWIR_2'],
+  datetimeName: 'date',
+  datetimeFormat: 'YYYY-MM-dd'
+};
+
+// Extract zonal statistics per point per image.
+var SentinelStats = zonalStats(dataset, simplifiedlakes, params);
+
+print(SentinelStats.limit(50));
+
+ // Export the FeatureCollection.
+Export.table.toDrive({
+  collection: SentinelStats,
+  description: 'exportLakeColors',
+  fileFormat: 'CSV',
+}); 

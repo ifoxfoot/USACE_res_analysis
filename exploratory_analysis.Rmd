@@ -1,0 +1,396 @@
+---
+title: "Exploratory Analysis of Zebra/Quagga Mussel Invasion"
+author: "Iris Foxfoot"
+date: "2024-07-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr) #for data wrangling
+library(sf) #for spatial data
+library(maps) #to get state boundary data
+library(ggplot2) #for making plots/maps
+library(stringr) #string manipulation
+```
+
+# Data
+
+compiled_data is modified version of USACE Reservoir data, with added landcover, geology, and connectivity data for each reservoir.
+
+climate_data is 30 year normal PRISM climate data extracted for each reservoir in the dataset.
+
+ndci_data is seasonal mean ndci (normalized difference chlorophyll index) derived from sentinel-2
+
+```{r}
+compiled_data <- read.csv("raw_data/USACE_REservoirs_Final.csv")
+
+```
+
+# Purpose
+
+The goal of this data exploration is to identify environmental variables that might be predictors of zebra mussel invasion, designated by an `infest_status` of 1.
+
+I first use a series of logistic regressions and then use a gradient boosted model.
+
+# What Reservoirs are Infested
+
+```{r warning=FALSE, message=FALSE}
+#get state data
+state_map <- map_data("state")
+
+#load USACE reservoir data
+res_raw <- read_sf("raw_data/USACE_Reservoirs/USACE_Reservoirs_Final.shp") %>% 
+  janitor::clean_names() %>% 
+  sf::st_make_valid() 
+
+#get centers of lakes
+res_center <- st_centroid(res_raw) %>% 
+  select(infest_sta, name) %>% 
+  mutate(infest_status = as.factor(infest_sta))
+
+#plot it
+ggplot() +
+  geom_polygon(data = state_map, aes(x=long,y=lat,group=group), inherit.aes=F, 
+     colour='black', fill=NA) +
+  geom_sf(data = res_center, aes(color = infest_status)) +
+  scale_color_manual(values = c("0" = "blue", "1" = "red"), 
+                     labels = c("0" = "absent", "1" = "present"),
+                     name = "Dreissenid Presence") +
+  labs(title = "Dreissenid presence in USACE reservoirs") +
+  theme_void()
+```
+
+# Classifying Risk of Infestation
+
+pH, mean summer temperature, maximum summer temperature, hardness, and distance were classified into low risk, medium risk, and high risk of zebra mussel invasion. Classifications were predominantly based on a 1997 report from North Carolina (Doll 1997). Maximum summer temperature was partially based on Cohen and Weinstein 1998. Hardness was based on Sorba and Williamson 1997 in Manitoba. Distance was based on Carrillo et al., 2023.
+
+| Variable                   | Low Risk       | Medium Risk        | High Risk  | Source                                                                                                                     |
+|-------------|-------------|-------------|-------------|--------------------|
+| pH                         | \<6.8 or \>9.5 | 6.8-7.4 or 8.7-9.5 | 7.4-8.7    | Table 7 of Cohen report (from Doll 1997 in North Carolina)                                                                 |
+| Mean Summer Temperature    | \<15C or \>32C | 31-32C             | 15-31C     | Table 7 of Cohen report (from Doll 1997 in North Carolina)                                                                 |
+| Maximum Summer Temperature | \<10 or \>40   | \>=31 or \<=40     | 10-31C     | Modified from Cohen and Weinstein 1998, Doll 1997                                                                          |
+| Total Hardness             | \<45 mg/L      | 45-90 mg/L         | \>=90 mg/L | Cohen report Table 8 (from Sorba and Williamson 1997 in Manitoba); Very low and low dist. potential combined into low risk |
+| Distance to Infestation    | \>161 km       | 80-161 km          | \< 80 km   | Carrillo et al. (2023) buffer distances of 50 miles and 100 miles                                                          |
+
+: Risk Classifications Table
+
+```{r}
+#classify risk using case_when statements
+risk_classified <- compiled_data %>% 
+  mutate(ph_risk = case_when(pH_min > 9.5 | pH_max < 6.8 ~ "low",
+                             pH_max < 7.4 | pH_min > 8.7 ~ "medium",
+                             T ~ "high"),
+         summer_mean_risk = case_when(summer_mean_temp > 32 | 
+                                        summer_mean_temp < 15 ~ "low",
+                                      summer_mean_temp >= 31 &
+                                        summer_mean_temp <= 32 ~ "medium",
+                                      T ~ "high"),
+         summer_max_risk = case_when(summer_max_temp > 40 | 
+                                       summer_max_temp < 10 ~ "low",
+                                     summer_max_temp >= 31 &
+                                       summer_max_temp <= 40 ~ "medium",
+                                     T ~ "high"),
+         hardness_risk = case_when(max_hardness < 45 ~ "low",
+                                   min_hardness >= 45 &
+                                     max_hardness <= 90 ~ "medium",
+                                   T ~ "high"
+                                     ),
+         distance_risk = case_when(dist_to_infest_km > 161 ~ "low",
+                                   dist_to_infest_km >= 80 & 
+                                     dist_to_infest_km <= 161 ~ "medium",
+                                   T ~ "high")
+         ) %>%
+  mutate(overall_risk_dist = case_when(
+    rowSums(across(summer_mean_risk:distance_risk, 
+                   ~ str_detect(., "low"))) != 0 ~ "Low",
+    rowSums(across(summer_mean_risk:distance_risk,
+                   ~str_detect(., "medium"))) != 0 ~ "Moderate",
+    TRUE ~ "High"
+  ))
+
+#bind threshold data to geo data
+thresh_geo <- left_join(res_center, risk_classified, join_by(name))
+
+#plot it
+ggplot() +
+  geom_polygon(data = state_map, aes(x=long,y=lat,group=group), inherit.aes=F, 
+     colour='black', fill=NA) +
+  geom_sf(data = thresh_geo, aes(color = overall_risk_dist)) +
+  scale_color_manual(values = c("Low" = "green", "Moderate" = "orange", "High" = "red"),
+                     name = "Risk of Dreissenid Infestation") +
+  labs(title = "Dreissenid invasion risk in USACE reservoirs") +
+  theme_void()
+```
+
+Risk is concentrated in the upper Midwest and North East. 
+
+# landcover
+
+```{r}
+#some data cleaning
+landcover_25  <- data_joined %>%
+  select(infest_status, c(perce_dev_openspace_25mi:perc_wetland_25mi)) %>% 
+  mutate(infest_status = as.factor(infest_status))
+
+#run the model
+landcover_25_logit <- glm(infest_status ~ ., data = landcover_25, family = "binomial")
+
+#print model
+landcover_25_logit
+
+#print model summary
+summary(landcover_25_logit)
+```
+
+Notes: model did not converge with percent open water or percent perennial snow and ice included in 25mi set. In this model, percent forest and percent shrub/scrub are statistically significant predictors of infestation (both with a negative influence on infestation).
+
+Development does not appear significant, but maybe if development were summed...
+
+```{r}
+#looking at what happens when development landcovers are summed
+dev_sum <- data_joined %>% 
+  mutate(dev_sum_25mi = perce_dev_openspace_25mi + perc_dev_lowintensity_25mi + perc_dev_medintensity_25mi + perc_dev_highintensity_25mi) %>% 
+  select(dev_sum_25mi, infest_status, c(perc_barren_25mi:perc_wetland_25mi)) %>% 
+  mutate(infest_status = as.factor(infest_status))
+
+#run new model
+dev_sum_25_logit <- glm(infest_status ~ ., data = dev_sum, family = "binomial")
+
+#print new model
+dev_sum_25_logit
+
+#summarise new model
+summary(dev_sum_25_logit)
+```
+
+Notes: When the percent of developed land is aggregated, shrub/scrub and forest cover are still the most significant predictors of infestation. Aggregated development cover has a slight negative relationship with infestation, and is borderline statistically significant. This model shows a lower AIC, indicating better model performance when development is summed.
+
+# Water Chemestry and Geology
+
+For pH and Hardness, I used the midpoint of the given range of values.
+
+```{r}
+#looking at geology and water chemistry
+water_chem <- data_joined %>% 
+  mutate(mean_ph = (pH_min + pH_max)/2,
+         mean_hardness = (min_hardness + max_hardness)/2) %>% 
+  select(infest_status, mean_ph, mean_hardness, c(perc_CaO_25mi:perc_resid_volcanic_art_wat_25mi)) %>% 
+  mutate(infest_status = as.factor(infest_status))
+
+#run the model
+water_chem_logit <- glm(infest_status ~ ., data = water_chem, family = "binomial")
+
+#print model
+water_chem_logit
+
+#print summary
+summary(water_chem_logit)
+```
+
+Notes: this model does not indicate that pH, hardness, or underlying geology are statistically significant predictors of infestation. This model has a comparatively higher AIC score, indicating poor model performance.
+
+# Climate
+
+Note: climate variables are likely all correlated which is not ideal for logistic regression. This model is for exploratory purposes only.
+
+```{r}
+#looking at climate
+climate <- data_joined %>% 
+  select(infest_status, c(winter_total_precip:fall_max_temp)) %>% 
+  mutate(infest_status = as.factor(infest_status))
+
+#run the model
+climate_logit <- glm(infest_status ~., data = climate, family = "binomial")
+
+#print model
+climate_logit
+
+#print model summary
+summary(climate_logit)
+```
+
+Note: This model shows spring temps as being potentially important.
+
+```{r}
+#looking at just mean temps
+mean_temp <- climate %>% 
+  select(infest_status, spring_mean_temp, summer_mean_temp, fall_mean_temp, winter_mean_temp) %>% 
+  mutate(infest_status = as.factor(infest_status))
+
+#run model with mean temps
+mean_temp_logit <- glm(infest_status ~., data = mean_temp, family = "binomial")
+
+#print model
+mean_temp_logit
+
+#print model summary
+summary(mean_temp_logit)
+```
+
+When looking at just mean temps, spring temps are no longer most significant and they do not have particularly strong influence on infestation. Now, winter temps have a significant negative relationship with infestation.
+
+# size and connectivity
+
+```{r}
+#looking at proximity to water bodies, connection status, etc
+connectivity <- data_joined %>% 
+  select(infest_status, dist_to_infest_km, surface_area_km, connectivity,) %>% 
+  mutate(infest_status = as.factor(infest_status))
+
+#run model
+connect_logit <- glm(infest_status ~., data = connectivity, family = "binomial")
+
+#print model
+connect_logit
+
+summary(connect_logit)
+```
+
+Notes: distance to infestation is most significant predictor, surface area is also significant. Increasing distance has a negative relationship with infestation while increasing surface area has a slight positive relationship with infestation. This model has lowest AIC so far, indicating better predictive power when compared with the previous logistic regression models.
+
+## Gradient boosted model
+
+A gradient boosted model is a flexible machine learning algorithm that is immune to issues caused by multicollinearity. It works by combining multiple weak models (think small decision trees) into one strong model.
+
+In this instance, we split the data into training data to train the model and testing data to test the model. Since there is so little data, taking even a few observations away to later test the model on may impact the model training.
+
+Below is a summary of the model, trained using the training data.
+
+```{r warning=FALSE,message=FALSE,fig.height=20,fig.width=20,attr.output='style="max-height: 500px;"'}
+library(gbm) #for gradient boosting models
+library(Metrics) #for RMSE calculation
+library(rsample) #for splitting data into test and training
+
+#prepare data for gradient boosted tree
+boosted_data <- ZQM_data %>% 
+  select(dist_to_infest_km:infest_status) %>% 
+  select(-hardness_range, -pH_range) %>% 
+  mutate(connectivity = as.factor(connectivity)) %>% 
+  mutate(infest_status = as.numeric(infest_status))
+
+#set factor levels for connectivity
+boosted_data$connectivity <- factor(boosted_data$connectivity, levels = c("None", "Dam", "Lock and Dam"))
+
+#define split parameters
+boosted_data_split <- boosted_data %>% 
+  initial_split(prop = 0.8, strata = infest_status)
+
+#write split data to data frames
+train_split <- training(boosted_data_split)
+test_split <- testing(boosted_data_split)
+
+#run model
+infest_gbm = gbm(infest_status ~ ., 
+                 distribution = "bernoulli",
+                 data = train_split,
+                 n.trees = 1000,
+                 shrinkage = 0.01,
+                 interaction.depth = 4)
+#print model
+infest_gbm
+```
+
+Below is a list of the most influential variables, according to the gradient boosted model.
+
+```{r warning=FALSE,message=FALSE,fig.height=20,fig.width=20,attr.output='style="max-height: 500px;"'}
+#the model summary
+summary(infest_gbm, plotit = F)
+```
+
+Note: Distance to infestation is vastly more important than other predictors. 
+
+It is also possible to see the general relationship between the predictor variables and the outcome variable. Below are two figures showing the relationship between infestation on the Y axis and the predictor variable on the X axis.
+
+```{r}
+#plot some rough graphs showing relationship between infestation and key vars
+plot(infest_gbm,i="dist_to_infest_km")
+```
+
+Figure x. There is a negative relationship between infestation and the distance to the nearest infected body of water. Infestation is much more likely when other infestations are close.
+
+```{r}
+plot(infest_gbm,i="surface_area_km") 
+```
+
+Figure x. There is a positive relationship between infestation and the size of the reservoir. Larger reservoirs are more likely to be infested.
+
+Next we use the model to generate predictions. We will then create a confusion matrix and calculate RMSE. Below is a confusion matrix for the training data.
+
+```{r, message=FALSE}
+confusionMatrix(table(predict(infest_gbm, newdata = train_split,
+                              type="response") >= 0.5,
+                      train_split$infest_status == 1))
+```
+
+Below is the RMSE for the training data
+
+```{r, message=FALSE}
+#create predictions
+predictions_training <- predict(infest_gbm, newdata = train_split, type = "response")
+
+#calculate RMSE for training data
+Metrics::rmse(predictions_training, train_split$infest_status)
+```
+
+Below is a confusion matrix for the test data.
+
+```{r, message=FALSE}
+#testing model
+
+confusionMatrix(table(predict(infest_gbm, newdata = test_split,
+                              type="response") >= 0.5,
+                      test_split$infest_status == 1))
+```
+
+Below is RMSE for the test data.
+
+```{r, message=FALSE}
+#create predictions
+predictions_test <- predict.gbm(infest_gbm, newdata = test_split, type = "response")
+
+#calculate RMSE for training data
+Metrics::rmse(predictions_test, test_split$infest_status)
+```
+
+The shows some signs of overfitting. It "predicts" infestation with perfect accuracy when given the training data, but it is less accurate when predicting infestation with new data. Still, the model is reasonably effective and may be further improved with model tuning.
+
+### Random forest with test and training datasets
+
+Below is a random forest model trained with the same training data given to the gradient boosted model. First the variable importance is displayed:
+
+```{r attr.output='style="max-height: 500px;"'}
+#Random forest with training and test datasets
+
+#train model
+
+infest_rf = randomForest(as.factor(infest_status) ~ ., #writing the formula
+                          data = train_split, #specifying training data to be used
+                          mtry = 9, #setting number of variables to randomly sample per each split
+                          ntree= 500, #setting number of trees
+                          na.action = na.omit, #specifying what to do with NAs
+                          importance = TRUE #specifying importance of variables should be assessed
+                          )
+
+#check the importance
+infest_rf$importance
+```
+
+Then we will create a confusion matrix for the training data.
+
+```{r attr.output='style="max-height: 500px;"'}
+#training confusion matrix
+p_train <- predict(infest_rf, newdata = train_split)
+confusionMatrix(p_train, as.factor(train_split$infest_status))
+```
+
+Followed by a confusion matrix for the test data.
+
+```{r attr.output='style="max-height: 500px;"'}
+#test confusion matrix
+p_test <- predict(infest_rf, newdata = test_split)
+confusionMatrix(p_test, as.factor(test_split$infest_status))
+
+#No RMSE for categorical outcomes in RF
+
+```
