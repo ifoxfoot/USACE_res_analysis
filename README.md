@@ -1,2 +1,10 @@
-# USACE_res_analysis
-This repository contains part of an analysis of zebra mussel invasion risk in USACE reservoirs 
+# Analyzing the Risk of Dreissenid Mussel Invasion Risk in USACE Reservoirs
+This repository contains my contributions to a project analyzing the risk of dreissenid mussel invasion in freshwater reservoirs managed by the U.S. Army Corps of Engineers. Dreissenid mussels are a group of non-native freshwater mussels, including zebra and quagga mussels, which are particularly damaging to the environment as well as our nation’s infrastructure. Dreissenid mussels may outcompete or smother native freshwater mussels, and they can also damage equipment in locks, dams, and hydroelectric facilities. Managers must allocate resources strategically in areas that are high risk to prevent new invasions. This analysis found that the biggest risk factors are distance to the nearest infestation and size of the water body. This indicates dreissenid mussels are not limited by environmental conditions, and risk is mostly a function of exposure.
+
+# File descriptions
+- This project has a folder called `raw_data`. The data in this file includes a shapefile of USACE reservoirs, extracted PRISM climate data (not pushed to github, run prism_extraction to generate data), extracted sentinel2 data (not pushed to github, run gee_sentinel_extract on Google Earth Engine to download data), and a csv where climate, land use, water chemistry, and other data were combined into one dataset.
+- The folder `extracted_data` contains processed PRISM climate data and processed sentinel2 data.
+- The rmarkdown file `exploratory_analysis` contains a few maps and a statistical analysis of the risk of dreissenid mussel invasion. The goal of the analysis was to understand which variables are most influential when predicting risk.
+- The txt file `gee_sentinel_extract` is a copy of the code I used to extract and process sentinel2 data using Google Earth Engine’s code editor.
+- The rmarkdown file `prism_extraction` contains the R code I used to download, extract and summarize PRISM climate data for each reservoir. 
+- The rmarkdown file `sentinel2_processing` contains the R code I used to calculate normalized chlorophyll difference index from extracted sentinel data.
