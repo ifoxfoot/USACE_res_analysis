@@ -16,24 +16,19 @@ library(stringr) #string manipulation
 
 # Data
 
-compiled_data is modified version of USACE Reservoir data, with added landcover, geology, and connectivity data for each reservoir.
-
-climate_data is 30 year normal PRISM climate data extracted for each reservoir in the dataset.
-
-ndci_data is seasonal mean ndci (normalized difference chlorophyll index) derived from sentinel-2
+`compiled_data` is modified version of USACE Reservoir data, with added landcover, geology, water chemistry, infestation status, connectivity, climate and NDCI data for each reservoir.
 
 ```{r}
 compiled_data <- read.csv("raw_data/USACE_REservoirs_Final.csv")
-
 ```
 
 # Purpose
 
 The goal of this data exploration is to identify environmental variables that might be predictors of zebra mussel invasion, designated by an `infest_status` of 1.
 
-I first use a series of logistic regressions and then use a gradient boosted model.
+I first use a series of logistic regressions and then use a gradient boosted model and a random forest model.
 
-# What Reservoirs are Infested
+# Map of Infested Reservoirs
 
 ```{r warning=FALSE, message=FALSE}
 #get state data
@@ -112,6 +107,10 @@ risk_classified <- compiled_data %>%
 #bind threshold data to geo data
 thresh_geo <- left_join(res_center, risk_classified, join_by(name))
 
+#convert risk to ordered factors
+thresh_geo$overall_risk_dist <- factor(thresh_geo$overall_risk_dist, levels = c("High", "Moderate", "Low"))
+
+
 #plot it
 ggplot() +
   geom_polygon(data = state_map, aes(x=long,y=lat,group=group), inherit.aes=F, 
@@ -125,12 +124,16 @@ ggplot() +
 
 Risk is concentrated in the upper Midwest and North East. 
 
-# landcover
+# Logistic Regression
+
+In this section I run a series of logistic regressions to try discover significant predictors of infestation.
+
+## Landcover
 
 ```{r}
 #some data cleaning
-landcover_25  <- data_joined %>%
-  select(infest_status, c(perce_dev_openspace_25mi:perc_wetland_25mi)) %>% 
+landcover_25  <- compiled_data %>%
+  select(infest_status, c(perc_dev_openspace_25mi:perc_wetland_25mi)) %>% 
   mutate(infest_status = as.factor(infest_status))
 
 #run the model
@@ -143,14 +146,14 @@ landcover_25_logit
 summary(landcover_25_logit)
 ```
 
-Notes: model did not converge with percent open water or percent perennial snow and ice included in 25mi set. In this model, percent forest and percent shrub/scrub are statistically significant predictors of infestation (both with a negative influence on infestation).
+Notes: model did not converge with percent perennial snow and ice included in 25mi set. In this model, forest, shrubscrub, herbaceous, haypasture, crops and wetland are statistically significant predictors of infestation (with a negative influence on infestation).
 
 Development does not appear significant, but maybe if development were summed...
 
 ```{r}
 #looking at what happens when development landcovers are summed
-dev_sum <- data_joined %>% 
-  mutate(dev_sum_25mi = perce_dev_openspace_25mi + perc_dev_lowintensity_25mi + perc_dev_medintensity_25mi + perc_dev_highintensity_25mi) %>% 
+dev_sum <- compiled_data %>% 
+  mutate(dev_sum_25mi = perc_dev_openspace_25mi + perc_dev_lowintensity_25mi + perc_dev_medintensity_25mi + perc_dev_highintensity_25mi) %>% 
   select(dev_sum_25mi, infest_status, c(perc_barren_25mi:perc_wetland_25mi)) %>% 
   mutate(infest_status = as.factor(infest_status))
 
@@ -166,13 +169,13 @@ summary(dev_sum_25_logit)
 
 Notes: When the percent of developed land is aggregated, shrub/scrub and forest cover are still the most significant predictors of infestation. Aggregated development cover has a slight negative relationship with infestation, and is borderline statistically significant. This model shows a lower AIC, indicating better model performance when development is summed.
 
-# Water Chemestry and Geology
+## Water Chemestry and Geology
 
 For pH and Hardness, I used the midpoint of the given range of values.
 
 ```{r}
 #looking at geology and water chemistry
-water_chem <- data_joined %>% 
+water_chem <- compiled_data %>% 
   mutate(mean_ph = (pH_min + pH_max)/2,
          mean_hardness = (min_hardness + max_hardness)/2) %>% 
   select(infest_status, mean_ph, mean_hardness, c(perc_CaO_25mi:perc_resid_volcanic_art_wat_25mi)) %>% 
@@ -188,15 +191,15 @@ water_chem_logit
 summary(water_chem_logit)
 ```
 
-Notes: this model does not indicate that pH, hardness, or underlying geology are statistically significant predictors of infestation. This model has a comparatively higher AIC score, indicating poor model performance.
+Notes: this model does not indicate that pH, hardness, or underlying geology are statistically significant predictors of infestation. This model has a comparatively higher AIC score, indicating poorer model performance.
 
-# Climate
+## Climate
 
 Note: climate variables are likely all correlated which is not ideal for logistic regression. This model is for exploratory purposes only.
 
 ```{r}
 #looking at climate
-climate <- data_joined %>% 
+climate <- compiled_data %>% 
   select(infest_status, c(winter_total_precip:fall_max_temp)) %>% 
   mutate(infest_status = as.factor(infest_status))
 
@@ -230,11 +233,11 @@ summary(mean_temp_logit)
 
 When looking at just mean temps, spring temps are no longer most significant and they do not have particularly strong influence on infestation. Now, winter temps have a significant negative relationship with infestation.
 
-# size and connectivity
+## Size and Connectivity
 
 ```{r}
 #looking at proximity to water bodies, connection status, etc
-connectivity <- data_joined %>% 
+connectivity <- compiled_data %>% 
   select(infest_status, dist_to_infest_km, surface_area_km, connectivity,) %>% 
   mutate(infest_status = as.factor(infest_status))
 
@@ -249,7 +252,7 @@ summary(connect_logit)
 
 Notes: distance to infestation is most significant predictor, surface area is also significant. Increasing distance has a negative relationship with infestation while increasing surface area has a slight positive relationship with infestation. This model has lowest AIC so far, indicating better predictive power when compared with the previous logistic regression models.
 
-## Gradient boosted model
+# Gradient Boosted Model
 
 A gradient boosted model is a flexible machine learning algorithm that is immune to issues caused by multicollinearity. It works by combining multiple weak models (think small decision trees) into one strong model.
 
@@ -261,9 +264,10 @@ Below is a summary of the model, trained using the training data.
 library(gbm) #for gradient boosting models
 library(Metrics) #for RMSE calculation
 library(rsample) #for splitting data into test and training
+library(caret) #for confusion matrix
 
 #prepare data for gradient boosted tree
-boosted_data <- ZQM_data %>% 
+boosted_data <- compiled_data %>% 
   select(dist_to_infest_km:infest_status) %>% 
   select(-hardness_range, -pH_range) %>% 
   mutate(connectivity = as.factor(connectivity)) %>% 
@@ -307,13 +311,13 @@ It is also possible to see the general relationship between the predictor variab
 plot(infest_gbm,i="dist_to_infest_km")
 ```
 
-Figure x. There is a negative relationship between infestation and the distance to the nearest infected body of water. Infestation is much more likely when other infestations are close.
+Figure 1. There is a negative relationship between infestation and the distance to the nearest infected body of water. Infestation is much more likely when other infestations are close.
 
 ```{r}
 plot(infest_gbm,i="surface_area_km") 
 ```
 
-Figure x. There is a positive relationship between infestation and the size of the reservoir. Larger reservoirs are more likely to be infested.
+Figure 2. There is a positive relationship between infestation and the size of the reservoir. Larger reservoirs are more likely to be infested.
 
 Next we use the model to generate predictions. We will then create a confusion matrix and calculate RMSE. Below is a confusion matrix for the training data.
 
@@ -336,8 +340,6 @@ Metrics::rmse(predictions_training, train_split$infest_status)
 Below is a confusion matrix for the test data.
 
 ```{r, message=FALSE}
-#testing model
-
 confusionMatrix(table(predict(infest_gbm, newdata = test_split,
                               type="response") >= 0.5,
                       test_split$infest_status == 1))
@@ -353,17 +355,17 @@ predictions_test <- predict.gbm(infest_gbm, newdata = test_split, type = "respon
 Metrics::rmse(predictions_test, test_split$infest_status)
 ```
 
-The shows some signs of overfitting. It "predicts" infestation with perfect accuracy when given the training data, but it is less accurate when predicting infestation with new data. Still, the model is reasonably effective and may be further improved with model tuning.
+The model shows some signs of overfitting. It "predicts" infestation with perfect accuracy when given the training data, but it is less accurate when predicting infestation with new data. This is common with such a small dataset. Still, the model is reasonably effective and may be further improved with model tuning.
 
-### Random forest with test and training datasets
+# Random Forest Model
 
 Below is a random forest model trained with the same training data given to the gradient boosted model. First the variable importance is displayed:
 
 ```{r attr.output='style="max-height: 500px;"'}
-#Random forest with training and test datasets
+#load package
+library(randomForest)
 
 #train model
-
 infest_rf = randomForest(as.factor(infest_status) ~ ., #writing the formula
                           data = train_split, #specifying training data to be used
                           mtry = 9, #setting number of variables to randomly sample per each split
@@ -392,5 +394,6 @@ p_test <- predict(infest_rf, newdata = test_split)
 confusionMatrix(p_test, as.factor(test_split$infest_status))
 
 #No RMSE for categorical outcomes in RF
-
 ```
+
+Random forest produces results similar to the gradient boosted model. Again, distance to infestation and water body size are the most "important" predictors. Again the model "predicts" infestation with perfect accuracy when given the training data, but it is less accurate when predicting infestation with new data.

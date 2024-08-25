@@ -38,29 +38,15 @@ res_raw <- read_sf("raw_data/USACE_Reservoirs/USACE_Reservoirs_Final.shp")
 
 res_clean <- res_raw %>% 
   janitor::clean_names() %>% #convert column names to lower case snake
-  sf::st_make_valid() %>% #make sure all shapes are "valid" geometry
-  filter(dry != "Yes") #remove dry lakes
-
-#temporary
-res_clean <- res_clean %>% 
-  mutate(area = st_area(res_clean))
-
-#clarify duplicate names
-res_clean_name <- res_clean %>% 
-  mutate(name = ifelse(
-    district == "Tulsa District" & name == "Sardis Lake",
-    "Sardis Lake Tulsa", name)) %>% 
-  mutate(name = ifelse(
-    district == "Vicksburg District" & name == "Sardis Lake",
-    "Sardis Lake Vicksburg", name))
+  sf::st_make_valid()
 
 #get centers of lakes
 res_center <- st_centroid(res_clean_name) %>% 
   select(objectid)
 
 #plot data to make sure it looks okay
-plot(st_geometry(res_clean_name))
-plot(st_geometry(res_center), pch = 3, col = 'red', add = TRUE)
+#plot(st_geometry(res_clean_name))
+#plot(st_geometry(res_center), pch = 3, col = 'red', add = TRUE)
 ```
 
 # Downloading PRISM data
