@@ -2,5 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
-raw_data
+raw_data/prism_data
+raw_data/full_lake_colors_1yr.csv
 .DS_store
